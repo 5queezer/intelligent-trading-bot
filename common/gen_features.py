@@ -197,9 +197,9 @@ def generate_features_talib(df, config: dict, last_rows: int = 0):
     if not isinstance(func_names, list):
         func_names = [func_names]
 
-    windows = config.get('windows')
-    if not isinstance(windows, list):
-        windows = [windows]
+    params_list = config.get('params')
+    if not isinstance(params_list, list):
+        params_list = [params_list]
 
     names = config.get('names')
 
@@ -209,101 +209,48 @@ def generate_features_talib(df, config: dict, last_rows: int = 0):
     outs = []
     features = []
     for func_name in func_names:
-        fn_outs = []
-        fn_out_names = []
-
-        # Determine if the function support stream mode
+        # Get the abstract function to access metadata like output_names
         try:
-            fn = getattr(talib_mod_abstract, func_name)  # Resolve function name
+            fn_abstract = getattr(talib_mod_abstract, func_name)
+        except AttributeError as e:
+            raise ValueError(f"Cannot resolve talib abstract function name '{func_name}'. Check the (existence of) name of the function")
+
+        # Get the actual function to be called
+        try:
+            fn = getattr(talib_mod, func_name)
         except AttributeError as e:
             raise ValueError(f"Cannot resolve talib function name '{func_name}'. Check the (existence of) name of the function")
-        is_streamable_function = fn.function_flags is None or 'Function has an unstable period' not in fn.function_flags
 
-        # TODO: Currently disable stream functions
-        is_streamable_function = False
+        # Now this function will be called for each parameter set in the list
+        for j, params in enumerate(params_list):
+            args = columns.copy()
+            if params:
+                args.update(params)
 
-        # Now this function will be called for each window as a parameter
-        for j, w in enumerate(windows):
+            # Execute TA-Lib function
+            out = fn(**args)
 
-            #
-            # Offline: The function will be executed in a rolling manner and applied to rolling windows
-            # Only aggregation functions have window argument (arithmetic row-level functions do not have it)
-            #
-            if not last_rows or not w or not is_streamable_function:
-                try:
-                    fn = getattr(talib_mod, func_name)  # Resolve function name
-                except AttributeError as e:
-                    raise ValueError(f"Cannot resolve talib function name '{func_name}'. Check the (existence of) name of the function")
+            # Prepare output names
+            param_str = "_".join([str(v) for v in params.values()]) if params else ""
+            base_out_name = f"{col_out_names}_{func_name}_{param_str}"
 
-                args = columns.copy()
-                if w:
-                    args['timeperiod'] = w
-                if w == 1 and len(columns) == 1:  # For window 1 use the original values (because talib fails to do this)
-                    out = next(iter(columns.values()))
-                else:
-                    out = fn(**args)
-
-            #
-            # Online: In a loop, compute the specified number of single values for the manually prepared windows
-            #
+            # If the function returns multiple outputs (like BBANDS or MACD), 'out' will be a tuple of Series
+            if isinstance(out, tuple):
+                # Use output_names from the abstract function metadata
+                output_names = fn_abstract.output_names
+                for i, out_series in enumerate(out):
+                    out_name = f"{base_out_name}_{output_names[i]}"
+                    out_series.name = out_name
+                    features.append(out_name)
+                    outs.append(out_series)
             else:
-                try:
-                    fn = getattr(talib_mod_stream, func_name)  # Resolve function name
-                except AttributeError as e:
-                    raise ValueError(f"Cannot resolve talib.stream function name '{func_name}'. Check the (existence of) name of the function")
+                # Single output
+                out.name = base_out_name
+                features.append(base_out_name)
+                outs.append(out)
 
-                # Here fn (function) is a different function from a different module (this function is applied to a single window rather than to rolling windows)
-                out_values = []
-                for r in range(last_rows):
-                    # Remove r elements from the end
-                    # Note that we do not remove elements from the start so the length is limited from one side only
-                    args = {k: v.iloc[:len(v)-r] for k, v in columns.items()}
-                    if w:
-                        args['timeperiod'] = w
-
-                    if w == 1 and len(columns) == 1:  # For window 1 use the original values (because talib fails to do this)
-                        col = next(iter(columns.values()))
-                        out_val = col.iloc[-r-1]
-                    else:
-                        out_val = fn(**args)
-                    out_values.append(out_val)
-
-                # Then these values are transformed to a series
-                out = pd.Series(data=np.nan, index=df.index, dtype=float)
-                out.iloc[-last_rows:] = list(reversed(out_values))  # Assign values to the last elements
-
-            #
-            # Name of the output column
-            #
-            # Now combin[e: columnnames + functionname + [if prefix null window [i] | elif prefix str + window[i] | else if list prefix[i]]
-            if not w:
-                if not names:
-                    out_name = f"{col_out_names}_{func_name}"
-                elif isinstance(names, str):
-                    out_name = names
-                elif isinstance(names, list):
-                    out_name = names[j]  # Should not happen
-            else:
-                out_name = f"{col_out_names}_{func_name}_"
-                win_name = str(w)
-                if not names:
-                    out_name = out_name + win_name
-                elif isinstance(names, str):
-                    out_name = out_name + names + "_" + win_name
-                elif isinstance(names, list):
-                    out_name = out_name + names[j]
-
-            fn_out_names.append(out_name)
-
-            out.name = out_name
-
-            fn_outs.append(out)
-
-        # Convert to relative values and percentage (except for the last output)
-        fn_outs = _convert_to_relative(fn_outs, rel_base, rel_func, percentage)
-
-        features.extend(fn_out_names)
-        outs.extend(fn_outs)
+    # TODO: Relative conversion for multiple outputs is not straightforward. Skipping for now.
+    # fn_outs = _convert_to_relative(fn_outs, rel_base, rel_func, percentage)
 
     for out in outs:
         df[out.name] = np.log(out) if log else out
