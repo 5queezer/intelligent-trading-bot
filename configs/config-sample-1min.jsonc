@@ -7,7 +7,7 @@
     "telegram_bot_token": "<token>",
     "telegram_chat_id": "<chat-id-to-publish-messages>",
 
-    "data_folder": "C:/DATA_ITB",
+    "data_folder": "DATA",
 
     "symbol": "BTCUSDT",
 
